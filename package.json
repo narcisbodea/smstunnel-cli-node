@@ -1,0 +1,47 @@
+{
+  "name": "smstunnel",
+  "version": "1.0.0",
+  "description": "Send texts from your computer through your own Android phone and number, with SMSTunnel. Sign-in codes, status, received texts and usage from the command line. Zero dependencies.",
+  "keywords": [
+    "smstunnel",
+    "sms",
+    "cli",
+    "text-message",
+    "send-sms-from-computer",
+    "android-sms",
+    "own-number",
+    "sign-in-code",
+    "2fa",
+    "terminal"
+  ],
+  "author": "NARBOWEB SRL",
+  "license": "MIT",
+  "homepage": "https://smstunnel.io",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "smstunnel": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "npm run build && node --test test/unit/args.test.mjs test/unit/numbers.test.mjs test/unit/sign-in-code.test.mjs test/unit/sms-parts.test.mjs test/unit/errors.test.mjs test/unit/store.test.mjs test/unit/time.test.mjs test/unit/format.test.mjs",
+    "test:e2e": "npm run build && node --test test/e2e/mock.e2e.test.mjs",
+    "test:dev-api": "npm run build && node --test test/e2e/dev-api.e2e.test.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "typescript": "^5.9.3"
+  }
+}
