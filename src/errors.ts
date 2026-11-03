@@ -33,6 +33,8 @@ export interface ErrorContext {
   /** Where the key came from: SMSTUNNEL_API_KEY, the saved key, or the one just pasted at login. */
   keySource?: 'env' | 'stored' | 'typed';
   apiBase: string;
+  /** The send carried --idempotency-key: running the same command again can't send a second text. */
+  idempotencyKey?: boolean;
 }
 
 function host(apiBase: string): string {
@@ -46,6 +48,8 @@ function host(apiBase: string): string {
 const sends = (operation: Operation) => operation === 'send' || operation === 'code';
 
 const DASHBOARD_KEY_HINT = `Create a key in your dashboard (${DASHBOARD_URL} → Apps → Add an app)`;
+
+const SAME_KEY_AGAIN = 'Run the same command again with the same --idempotency-key: SMSTunnel will not send the text twice.';
 
 /** What a refused or failed API call means for the person at the keyboard, and the exit code. */
 export function describeApiError(error: ApiError, context: ErrorContext): CliError {
@@ -61,7 +65,9 @@ export function describeApiError(error: ApiError, context: ErrorContext): CliErr
     if (sends(operation) && error.mayHaveArrived) {
       return new CliError(
         `The connection to SMSTunnel broke after the text was handed over, so it may have gone out. ` +
-          `Check the Messages page in your dashboard (${DASHBOARD_URL}) before you send it again.`,
+          (context.idempotencyKey
+            ? SAME_KEY_AGAIN
+            : `Check the Messages page in your dashboard (${DASHBOARD_URL}) before you send it again.`),
         EXIT.UNAVAILABLE,
         details,
       );
@@ -97,6 +103,25 @@ export function describeApiError(error: ApiError, context: ErrorContext): CliErr
     return new CliError(`SMSTunnel refused the request: ${said}`, EXIT.USAGE, details);
   }
 
+  if (status === 422 && error.code === 'IDEMPOTENCY_KEY_REUSED') {
+    return new CliError(
+      'This --idempotency-key was already used in the last 24 hours for a different text (another number, message, phone or ' +
+        'country code, or "code" instead of "send"). Nothing was sent. Use a new key for a new text.',
+      EXIT.USAGE,
+      details,
+    );
+  }
+
+  if (status === 409 && error.code === 'IDEMPOTENCY_KEY_IN_PROGRESS') {
+    const seconds = Math.max(1, error.retryAfter ?? 1);
+    return new CliError(
+      `SMSTunnel is still handling an earlier request with this --idempotency-key. Run the same command again in ${seconds} ` +
+        `second${seconds === 1 ? '' : 's'} to get its answer; it will not send a second text.`,
+      EXIT.RATE_LIMITED,
+      details,
+    );
+  }
+
   if (status === 401) {
     const from =
       context.keySource === 'env'
@@ -117,9 +142,9 @@ export function describeApiError(error: ApiError, context: ErrorContext): CliErr
       switch (error.permission) {
         case 'sms:inbox':
           return new CliError(
-            'This API key may not read received texts. In your dashboard, open API keys and allow reading received messages ' +
-              'for this key, or create a key with that permission. Your phone also needs "Sync received texts" turned on in the ' +
-              'SMSTunnel app; only texts that arrive after that are synced.',
+            `This API key may not read received texts. In your dashboard (${DASHBOARD_URL} → Apps), choose ` +
+              '"Allow reading received texts" for this key, or add an app with "Can also read received texts" ticked. ' +
+              'Your phone also needs "Sync received texts" turned on in the SMSTunnel app; only texts that arrive after that are synced.',
             EXIT.FORBIDDEN,
             details,
           );
@@ -179,11 +204,13 @@ export function describeApiError(error: ApiError, context: ErrorContext): CliErr
 
   if (status >= 500) {
     if (sends(operation)) {
-      return new CliError(
-        `SMSTunnel had a problem (HTTP ${status}). The text may or may not have been taken: check the Messages page in your dashboard (${DASHBOARD_URL}) before you send it again.`,
-        EXIT.UNAVAILABLE,
-        details,
-      );
+      const first = error.replayed
+        ? `SMSTunnel had a problem (HTTP ${status}) with the first request that used this --idempotency-key, and gives that same answer for 24 hours. `
+        : `SMSTunnel had a problem (HTTP ${status}). `;
+      const then = context.idempotencyKey
+        ? `The text may or may not have been taken: check the Messages page in your dashboard (${DASHBOARD_URL}). Running the command again with the same key gets this answer again; use a new key only once you know the text did not go out.`
+        : `The text may or may not have been taken: check the Messages page in your dashboard (${DASHBOARD_URL}) before you send it again.`;
+      return new CliError(first + then, EXIT.UNAVAILABLE, details);
     }
     return new CliError(
       `SMSTunnel had a problem (HTTP ${status}). Try again in a little while.`,

@@ -53,7 +53,10 @@ test('403 PERMISSION_REQUIRED names the permission, exit 4', () => {
   const inbox = describe(httpError(403, { code: 'PERMISSION_REQUIRED', permission: 'sms:inbox' }), 'received');
   assert.equal(inbox.exitCode, 4);
   assert.match(inbox.message, /may not read received texts/);
-  assert.match(inbox.message, /allow reading received messages/);
+  // The dashboard's own words: Apps → "Allow reading received texts" / "Can also read received texts".
+  assert.match(inbox.message, /dashboard\.smstunnel\.io → Apps\), choose "Allow reading received texts" for this key/);
+  assert.match(inbox.message, /"Can also read received texts" ticked/);
+  assert.doesNotMatch(inbox.message, /API keys/);
   assert.match(inbox.message, /Sync received texts/);
   assert.match(describe(httpError(403, { code: 'PERMISSION_REQUIRED', permission: 'sms:send' }), 'send').message, /may not send texts/);
   assert.match(describe(httpError(403, { code: 'PERMISSION_REQUIRED', permission: 'sms:read' }), 'status').message, /sms:read/);
@@ -122,4 +125,57 @@ test('error bodies: a list is joined, else message, error or short plain text', 
   assert.equal(errorMessageFrom({ error: 'Bad Request' }, '', 400), 'Bad Request');
   assert.equal(errorMessageFrom(undefined, 'Service Unavailable', 503), 'Service Unavailable');
   assert.equal(errorMessageFrom(undefined, '<html>…</html>', 502), 'HTTP 502');
+});
+
+// --idempotency-key (R3): the server's Idempotency-Key answers.
+const withKey = (error, operation = 'send') => describeApiError(error, { operation, keySource: 'stored', apiBase: BASE, idempotencyKey: true });
+
+test('422 IDEMPOTENCY_KEY_REUSED: the key belongs to another text, exit 2', () => {
+  const result = withKey(httpError(422, { code: 'IDEMPOTENCY_KEY_REUSED', message: 'This Idempotency-Key was already used…' }));
+  assert.equal(result.exitCode, 2);
+  assert.equal(
+    result.message,
+    'This --idempotency-key was already used in the last 24 hours for a different text (another number, message, phone or country code, or "code" instead of "send"). Nothing was sent. Use a new key for a new text.',
+  );
+  assert.equal(result.details.code, 'IDEMPOTENCY_KEY_REUSED');
+  // A 422 without that code is just another refusal.
+  assert.equal(describe(httpError(422, { message: 'Unprocessable' }), 'send').exitCode, 1);
+});
+
+test('409 IDEMPOTENCY_KEY_IN_PROGRESS: run it again in Retry-After seconds, exit 6', () => {
+  const result = withKey(httpError(409, { code: 'IDEMPOTENCY_KEY_IN_PROGRESS', retryAfter: 1 }));
+  assert.equal(result.exitCode, 6);
+  assert.equal(
+    result.message,
+    'SMSTunnel is still handling an earlier request with this --idempotency-key. Run the same command again in 1 second to get its answer; it will not send a second text.',
+  );
+  assert.match(withKey(httpError(409, { code: 'IDEMPOTENCY_KEY_IN_PROGRESS', retryAfter: 3 })).message, /again in 3 seconds/);
+  assert.match(withKey(httpError(409, { code: 'IDEMPOTENCY_KEY_IN_PROGRESS' })).message, /again in 1 second /);
+});
+
+test('a broken connection with --idempotency-key: running the same command again is safe', () => {
+  const broken = new ApiError({ kind: 'network', message: 'socket hang up', networkCode: 'ECONNRESET', mayHaveArrived: true });
+  const result = withKey(broken);
+  assert.equal(result.exitCode, 7);
+  assert.equal(
+    result.message,
+    'The connection to SMSTunnel broke after the text was handed over, so it may have gone out. Run the same command again with the same --idempotency-key: SMSTunnel will not send the text twice.',
+  );
+  assert.match(withKey(new ApiError({ kind: 'timeout', message: 'No answer', networkCode: 'ETIMEDOUT', mayHaveArrived: true }), 'code').message, /same --idempotency-key/);
+});
+
+test('5xx with --idempotency-key: the same key gets the same answer for 24 hours', () => {
+  const first = withKey(httpError(500));
+  assert.equal(first.exitCode, 7);
+  assert.equal(
+    first.message,
+    'SMSTunnel had a problem (HTTP 500). The text may or may not have been taken: check the Messages page in your dashboard (https://dashboard.smstunnel.io). Running the command again with the same key gets this answer again; use a new key only once you know the text did not go out.',
+  );
+  const replayed = withKey(httpError(500, { replayed: true }));
+  assert.match(replayed.message, /^SMSTunnel had a problem \(HTTP 500\) with the first request that used this --idempotency-key, and gives that same answer for 24 hours\. /);
+  // Without a key, the message is the one it always was.
+  assert.equal(
+    describe(httpError(502), 'send').message,
+    'SMSTunnel had a problem (HTTP 502). The text may or may not have been taken: check the Messages page in your dashboard (https://dashboard.smstunnel.io) before you send it again.',
+  );
 });

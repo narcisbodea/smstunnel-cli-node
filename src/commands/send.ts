@@ -12,6 +12,7 @@ import {
   StatusData,
 } from '../context';
 import { CliError, describeApiError, usageError } from '../errors';
+import { checkIdempotencyKey } from '../idempotency-key';
 import { checkCountryCode, checkRecipient } from '../numbers';
 import { readAllStdin } from '../prompt';
 import { containsSignInCode } from '../sign-in-code';
@@ -35,6 +36,10 @@ export type SendKind = 'text' | 'code';
 export type WaitOutcome = 'sent' | 'failed' | 'unconfirmed' | 'still-waiting' | 'interrupted';
 
 const DEFAULT_TIMEOUT_SECONDS = 120;
+
+/** The first line when SMSTunnel answered Idempotent-Replayed: true. */
+export const ALREADY_SENT =
+  'Already handed over with this --idempotency-key: SMSTunnel gave back its answer to the first request and did not send the text again.';
 
 /** A final state, or undefined while the text still waits for the phone. */
 export function outcomeOf(status: StatusData): Exclude<WaitOutcome, 'still-waiting' | 'interrupted'> | undefined {
@@ -160,6 +165,13 @@ export async function send(ctx: Context, args: string[], kind: SendKind): Promis
     throw usageError('--timeout goes with --wait.');
   }
 
+  let idempotencyKey: string | undefined;
+  if (typeof options['idempotency-key'] === 'string') {
+    const checked = checkIdempotencyKey(options['idempotency-key']);
+    if (!checked.ok) throw usageError(checked.message);
+    idempotencyKey = checked.value;
+  }
+
   const { key, source } = requireKey(ctx);
   const client = clientFor(ctx, key);
 
@@ -173,9 +185,21 @@ export async function send(ctx: Context, args: string[], kind: SendKind): Promis
   if (device) body.deviceId = device.id;
   if (country) body.defaultCountryCode = country;
 
-  const response = await call(ctx, command, source, () =>
-    client.post<SendResponse>(kind === 'code' ? '/sms/send-2fa' : '/sms/send', body),
+  // With --idempotency-key, a second run of the same command gets the first answer back instead of a second text.
+  const answer = await call(
+    ctx,
+    command,
+    source,
+    () =>
+      client.postWithAnswer<SendResponse>(
+        kind === 'code' ? '/sms/send-2fa' : '/sms/send',
+        body,
+        idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+      ),
+    { idempotencyKey: idempotencyKey !== undefined },
   );
+  const response = answer.body;
+  const replayed = answer.replayed;
   const messageId = response.messageId ?? response.data?.messageId;
   if (!messageId) {
     throw new CliError(
@@ -191,6 +215,7 @@ export async function send(ctx: Context, args: string[], kind: SendKind): Promis
     messageId,
     queued,
     branded,
+    replayed,
     parts,
     remaining: response.data?.remaining ?? null,
   };
@@ -200,6 +225,7 @@ export async function send(ctx: Context, args: string[], kind: SendKind): Promis
       out.data({ ...summary, result: queued ? 'queued' : 'handed-over', status: null });
       return EXIT.OK;
     }
+    if (replayed) out.line(ALREADY_SENT);
     out.line(
       queued
         ? 'Queued: none of your phones is online right now. The text goes out when your phone is back online (within 3 days).'
@@ -211,6 +237,7 @@ export async function send(ctx: Context, args: string[], kind: SendKind): Promis
   }
 
   if (!ctx.json) {
+    if (replayed) out.note(ALREADY_SENT);
     out.note(
       queued
         ? `Queued (message id ${messageId}): none of your phones is online right now. Waiting up to ${timeoutSeconds} s… (Ctrl+C stops waiting; the text still goes out)`

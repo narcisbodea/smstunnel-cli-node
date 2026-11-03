@@ -14,6 +14,8 @@ export interface ApiErrorInit {
   networkCode?: string;
   /** The request reached SMSTunnel, or may have: a text may have been taken. */
   mayHaveArrived: boolean;
+  /** SMSTunnel answered `Idempotent-Replayed: true`: the stored answer to an earlier request with the same Idempotency-Key. */
+  replayed?: boolean;
 }
 
 /** A call SMSTunnel refused, or that never got an answer. */
@@ -26,6 +28,7 @@ export class ApiError extends Error {
   readonly body?: unknown;
   readonly networkCode?: string;
   readonly mayHaveArrived: boolean;
+  readonly replayed: boolean;
 
   constructor(init: ApiErrorInit) {
     super(init.message);
@@ -38,7 +41,15 @@ export class ApiError extends Error {
     this.body = init.body;
     this.networkCode = init.networkCode;
     this.mayHaveArrived = init.mayHaveArrived;
+    this.replayed = init.replayed === true;
   }
+}
+
+/** An answer with what the headers said about it. */
+export interface ApiAnswer<T> {
+  body: T;
+  /** `Idempotent-Replayed: true`: SMSTunnel sent back the answer to the first request with this Idempotency-Key. */
+  replayed: boolean;
 }
 
 export interface ApiClientOptions {
@@ -163,12 +174,17 @@ export class ApiClient {
     this.timeoutMs = options.timeoutMs ?? 30_000;
   }
 
-  get<T = any>(path: string, query?: Record<string, string | number | undefined>): Promise<T> {
-    return this.request<T>('GET', path, query, undefined);
+  async get<T = any>(path: string, query?: Record<string, string | number | undefined>): Promise<T> {
+    return (await this.request<T>('GET', path, query, undefined)).body;
   }
 
-  post<T = any>(path: string, body: unknown): Promise<T> {
-    return this.request<T>('POST', path, undefined, body);
+  async post<T = any>(path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
+    return (await this.request<T>('POST', path, undefined, body, extraHeaders)).body;
+  }
+
+  /** A POST that also says whether SMSTunnel replayed an earlier answer (Idempotency-Key). */
+  postWithAnswer<T = any>(path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<ApiAnswer<T>> {
+    return this.request<T>('POST', path, undefined, body, extraHeaders);
   }
 
   private async request<T>(
@@ -176,7 +192,8 @@ export class ApiClient {
     path: string,
     query: Record<string, string | number | undefined> | undefined,
     body: unknown,
-  ): Promise<T> {
+    extraHeaders: Record<string, string> = {},
+  ): Promise<ApiAnswer<T>> {
     const url = new URL(this.base + path);
     for (const [name, value] of Object.entries(query ?? {})) {
       if (value !== undefined && value !== '') url.searchParams.set(name, String(value));
@@ -184,6 +201,7 @@ export class ApiClient {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     // The key travels only in this header, never in the URL.
     const headers: Record<string, string> = {
+      ...extraHeaders,
       'X-API-Key': this.apiKey,
       Accept: 'application/json',
       'User-Agent': this.userAgent,
@@ -207,6 +225,9 @@ export class ApiClient {
         mayHaveArrived: Boolean(e.requestWritten) && !NEVER_ARRIVED.has(networkCode),
       });
     }
+
+    const replayedHeader = raw.headers['idempotent-replayed'];
+    const replayed = (Array.isArray(replayedHeader) ? replayedHeader[0] : replayedHeader)?.trim().toLowerCase() === 'true';
 
     let parsed: unknown = undefined;
     if (raw.text.trim() !== '') {
@@ -236,6 +257,7 @@ export class ApiClient {
         retryAfter: parseRetryAfter(raw.headers['retry-after']),
         body: parsed,
         mayHaveArrived: true,
+        replayed,
       });
     }
     if (!parsed || typeof parsed !== 'object') {
@@ -253,8 +275,9 @@ export class ApiClient {
         message: errorMessageFrom(parsed, raw.text, raw.status),
         body: parsed,
         mayHaveArrived: true,
+        replayed,
       });
     }
-    return parsed as T;
+    return { body: parsed as T, replayed };
   }
 }

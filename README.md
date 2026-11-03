@@ -12,6 +12,8 @@ The phone needs the SMSTunnel app from Google Play, signed in to your account:
 
 <a href="https://play.google.com/store/apps/details?id=io.smstunnel.app"><img src="https://smstunnel.io/google-play-badge.png" alt="Get it on Google Play" height="56"></a>
 
+Documentation: [smstunnel.io/docs](https://smstunnel.io/docs/) · Dashboard: [dashboard.smstunnel.io/apps](https://dashboard.smstunnel.io/apps)
+
 ## Install
 
 ```bash
@@ -26,16 +28,19 @@ With Homebrew (macOS and Linux), once the tap is published:
 brew install narcisbodea/tap/smstunnel
 ```
 
-## Sign in
+On Windows, install Node.js first if you don't have it (`winget install OpenJS.NodeJS.LTS`), then `npm install -g smstunnel`.
 
-1. In your dashboard, [dashboard.smstunnel.io](https://dashboard.smstunnel.io), open **Apps → Add an app** and create the key. It is shown only once.
-2. Run:
+## Get your key
+
+1. Install the [SMSTunnel app from Google Play](https://play.google.com/store/apps/details?id=io.smstunnel.app) on your Android phone and sign in. The phone shows up under **Phones** in your dashboard.
+2. In your dashboard, [dashboard.smstunnel.io/apps](https://dashboard.smstunnel.io/apps), open **Apps → Add an app** and create the key. It is shown only once. It can send texts and look up whether they went out; reading received texts is a separate opt-in (**Can also read received texts**).
+3. Run `smstunnel login`, paste the key when asked (it stays hidden) and press Enter.
 
 ```bash
 smstunnel login
 ```
 
-Paste the key when asked (it stays hidden) and press Enter. The CLI checks it with SMSTunnel first and saves it only if it works:
+The CLI checks the key with SMSTunnel first and saves it only if it works:
 
 | System | Where the key is saved |
 |---|---|
@@ -46,7 +51,7 @@ Paste the key when asked (it stays hidden) and press Enter. The CLI checks it wi
 
 The key never goes on the command line. To pipe it in from a password manager: `pass show smstunnel | smstunnel login`.
 
-`SMSTUNNEL_API_KEY`, when set, is used instead of the saved key (handy in CI). `smstunnel logout` removes the saved key from this computer; the key itself keeps working until you deactivate or delete it in your dashboard.
+`SMSTUNNEL_API_KEY`, when set, is used instead of the saved key (handy in CI). `smstunnel logout` removes the saved key from this computer; the key itself keeps working until you deactivate or delete it in your dashboard (Apps).
 
 ## Send a text
 
@@ -62,6 +67,7 @@ Message id: 6ae9952f7f9ac207c547af90. Check it with: smstunnel status 6ae9952f7f
 - `--wait` waits until your phone sent it (or it failed), up to `--timeout` seconds (120 by default).
 - `--phone <id or name>` picks which of your phones sends it (`smstunnel phones` lists them). Without it, your default phone sends it.
 - `--country +40` is the country code for a number written without `+` or `00`: `0712 345 678` becomes `+40712345678`. Without it, SMSTunnel uses the country saved for your phone, then +40.
+- `--idempotency-key <key>` makes the command safe to run again: within 24 hours, the same command with the same key gets the first answer back (the same message id) instead of sending a second text. Use one key per text, such as `order-1042-ready`.
 - With no message, or `-`, the text is read from standard input: `echo "Backup finished" | smstunnel send +40712345678`.
 
 ```bash
@@ -110,7 +116,9 @@ smstunnel received --watch
 2026-11-03 10:02  +40755555555  (Store phone)  No problem, see you!
 ```
 
-This lists the texts your phone received after you turned on "Sync received texts" in the SMSTunnel app (it is off by default; the phone's existing inbox is never read). The key must be allowed to read received messages: in your dashboard, open API keys and allow it for that key. Options: `--since` (a date such as `2026-11-03`, or `30m`, `2h`, `1d`), `--from <number>`, `--phone <id or name>`, `--limit` (up to 100), and `--watch` to keep printing new texts as they arrive (every `--interval` seconds, 10 by default; Ctrl+C stops).
+This lists the texts your phone received after you turned on "Sync received texts" in the SMSTunnel app (it is off by default; the phone's existing inbox is never read). The key must be allowed to read them: in your dashboard, **Apps**, choose **Allow reading received texts** for the key, or tick **Can also read received texts** when you add the app. Options: `--since` (a date such as `2026-11-03`, or `30m`, `2h`, `1d`), `--from <number>`, `--phone <id or name>`, `--limit` (up to 100), and `--watch` to keep printing new texts as they arrive (every `--interval` seconds, 10 by default; Ctrl+C stops).
+
+To have received texts sent to your own server as they arrive instead, use **Apps → the key → Forward received texts** in your dashboard.
 
 ## Phones and usage
 
@@ -139,6 +147,12 @@ if smstunnel send "$MY_NUMBER" "Backup of $(hostname) finished" --wait --timeout
 fi
 ```
 
+A script that may run twice (a cron job, a CI retry) should give each text its own `--idempotency-key`: running it again then can't send the text twice.
+
+```bash
+smstunnel send "$CUSTOMER" "Order $ORDER is ready for pickup" --idempotency-key "order-$ORDER-ready"
+```
+
 Send only texts people expect from you: alerts to yourself, reminders, sign-in codes, replies they asked for.
 
 ### Exit codes
@@ -147,12 +161,12 @@ Send only texts people expect from you: alerts to yourself, reminders, sign-in c
 |---|---|
 | 0 | Done. A text "not confirmed by your phone" also ends with 0: it was most likely sent, never send it again |
 | 1 | Something unexpected |
-| 2 | Invalid arguments, or SMSTunnel refused the input (HTTP 400) |
+| 2 | Invalid arguments, or SMSTunnel refused the input (HTTP 400), or the `--idempotency-key` was already used for a different text (HTTP 422) |
 | 3 | No API key, or SMSTunnel refused it (HTTP 401) |
 | 4 | The key or your plan doesn't allow it (HTTP 403), for example a key that may not read received texts |
 | 5 | Not found (HTTP 404): an unknown message id or phone |
-| 6 | Too many requests (HTTP 429 with `Retry-After`: the CLI says how many seconds to wait), or today's allowance is used up (429 without it) |
-| 7 | SMSTunnel could not be reached or had a problem (5xx). If a send broke after it left, the CLI says the text may have gone out: check before sending it again |
+| 6 | Too many requests (HTTP 429 with `Retry-After`: the CLI says how many seconds to wait), today's allowance is used up (429 without it), or a request with the same `--idempotency-key` is still being handled (HTTP 409) |
+| 7 | SMSTunnel could not be reached or had a problem (5xx). If a send broke after it left, the CLI says the text may have gone out: check before sending it again, or run the same command with the same `--idempotency-key` |
 | 8 | The text failed (`send --wait` / `code --wait`) |
 | 9 | Still waiting for your phone when `--wait` gave up. The text goes out when your phone is back online: don't send it again |
 | 130 | You stopped `--wait` with Ctrl+C (the text is still on its way). Ctrl+C ends `received --watch` with 0 |
@@ -170,29 +184,42 @@ The CLI never resends a text by itself.
 
 ## Limits
 
-Up to 30 send requests a minute and 100 other requests a minute. How many texts and sign-in codes you can send a day depends on your plan: see [Pricing](https://smstunnel.io/pricing/) and `smstunnel usage`.
+Up to 30 send requests a minute per API key (the keys of one account together: 90), and 100 other requests a minute. How many texts and sign-in codes you can send a day depends on your plan: see [Pricing](https://smstunnel.io/pricing/) and `smstunnel usage`.
+
+## Build it with an AI assistant
+
+Paste this into Claude, ChatGPT, Cursor or Copilot, and replace the part in brackets. Never paste your real API key into a prompt.
+
+```text
+Write a script that sends texts with the SMSTunnel command-line tool. SMSTunnel sends each text from my own Android phone, from my own number: the phone runs the SMSTunnel app and is linked to my SMSTunnel account.
+
+Setup: Node.js 18 or newer, then `npm install -g smstunnel`. The API key comes from the environment variable SMSTUNNEL_API_KEY (in CI, a secret), or from `smstunnel login`, which reads it from stdin and saves it in the system keychain.
+
+Commands:
+- smstunnel send <number> <text> [--phone <id or name>] [--country +40] [--wait [--timeout 120]] [--idempotency-key <key>] [--json]
+- smstunnel code <number> <text> for sign-in codes only: the text must contain the code, 4 to 10 digits standing on their own (482913) or 123-456, at most 320 characters.
+- smstunnel status <message id>, smstunnel phones, smstunnel usage, smstunnel received [--since 2h] [--watch]. Received texts need the key's "Can also read received texts" opt-in.
+One number per command: to text several people, run it once per number. Numbers in international format (+14155550123); --country completes a number written without + or 00. Texts up to 1600 characters.
+Behind it is the SMSTunnel API: POST https://smstunnel.io/api/v1/sms/send with the header X-API-Key and {"to", "message", "deviceId"?, "defaultCountryCode"?}, one recipient per call, 30 send requests a minute per key.
+Exit codes: 0 done; 2 bad input (400) or an idempotency key reused for a different text; 3 key refused (401); 4 not allowed for this key or plan (403, with a code such as PERMISSION_REQUIRED); 5 not found; 6 too many requests (429: wait the seconds it says) or today's allowance used up; 7 SMSTunnel unreachable or a 5xx (the text may have gone out: don't resend blindly); 8 the text failed (--wait); 9 still waiting for the phone (--wait: it is offline, the text goes out when it is back; don't resend). With --json the result is JSON on stdout and errors are JSON on stderr: {"error":{"message","exitCode","status"}}.
+If my phone is offline, the text waits in the queue and goes out when the phone is back online.
+
+What I want: [describe what should send a text, to whom, and when]
+
+Rules:
+- Read the key from SMSTUNNEL_API_KEY or the saved login. Never write it in the script, never print it, never pass it as an argument.
+- Validate each phone number before sending (international format, one number per command).
+- Check the exit code of every command and handle the cases above. Give each text its own --idempotency-key (such as order-1042-ready) so a second run can't send it twice; never resend after exit 7 without the same key.
+- Only send texts people expect (alerts to myself, reminders, sign-in codes, replies they asked for).
+```
 
 ## Privacy
 
 The CLI talks only to `https://smstunnel.io` (or the `--api-base` you give it), over HTTPS, with your key in the `X-API-Key` header. It sends no analytics. See the [privacy policy](https://smstunnel.io/privacy/).
 
-## Homebrew tap
+## Responsible use
 
-`Formula/smstunnel.rb` is ready for a tap at `github.com/narcisbodea/homebrew-tap`:
-
-1. Publish the package to npm (`npm publish`).
-2. Put the tarball's SHA-256 in the formula:
-   ```bash
-   curl -sL https://registry.npmjs.org/smstunnel/-/smstunnel-1.0.0.tgz | shasum -a 256
-   ```
-3. Create the public repository `narcisbodea/homebrew-tap` and add the formula as `Formula/smstunnel.rb`.
-4. Check it: `brew install --build-from-source narcisbodea/tap/smstunnel && brew test smstunnel && brew audit --strict --online smstunnel`.
-
-People then install it with `brew install narcisbodea/tap/smstunnel`. For each new version, update `url` and `sha256`.
-
-## Why there is no winget package
-
-winget installs Windows programs from installers (MSI, MSIX, EXE) or self-contained zip files. `smstunnel` is a JavaScript program that runs on Node.js, and a winget package can't simply say "run this with the Node.js you have". It would need a single executable with Node.js bundled in (about 80 MB per version, rebuilt and code-signed for every release), for a tool that is a few kilobytes on npm. On Windows, install it with `npm install -g smstunnel` (Node.js itself is on winget: `winget install OpenJS.NodeJS.LTS`).
+Send only texts that people expect from you: alerts to yourself, appointment reminders, sign-in codes, replies they asked for. Unsolicited messages from a personal SIM break most carriers' terms of service. Please make sure your usage complies with your carrier's terms and with local regulations (in the EU, that includes GDPR and ePrivacy rules on electronic communications).
 
 ## Development
 
@@ -203,8 +230,10 @@ npm run test:e2e      # the built CLI against a local mock of the API
 npm run test:dev-api  # the built CLI against a local SMSTunnel API (see below)
 ```
 
-`test:dev-api` runs only when these are set, and only against a local API (never smstunnel.io): `SMSTUNNEL_E2E_API_BASE` (for example `http://127.0.0.1:3121/api/v1`), `SMSTUNNEL_E2E_KEY` (a throwaway key with `sms:send`, `sms:read` and `sms:inbox`), and optionally `SMSTUNNEL_E2E_SEND_ONLY_KEY`, `SMSTUNNEL_E2E_ONLINE_PHONE`, `SMSTUNNEL_E2E_OFFLINE_PHONE`, `SMSTUNNEL_E2E_NUMBER` and `SMSTUNNEL_E2E_EXPECT_RECEIVED`. It sends 3 texts. The tests never touch your real keychain: they use `SMSTUNNEL_KEY_STORE=file` and a temporary `SMSTUNNEL_CONFIG_DIR`. `SMSTUNNEL_KEYCHAIN_SERVICE` changes the keychain item name, for a manual check of the keychain code with a dummy key; `SMSTUNNEL_POLL_INTERVAL_MS` makes `--wait` and `--watch` poll faster in tests.
+`test:dev-api` runs only when these are set, and only against a local API (never smstunnel.io): `SMSTUNNEL_E2E_API_BASE` (for example `http://127.0.0.1:3121/api/v1`), `SMSTUNNEL_E2E_KEY` (a throwaway key with `sms:send`, `sms:read` and `sms:inbox`), and optionally `SMSTUNNEL_E2E_SEND_ONLY_KEY`, `SMSTUNNEL_E2E_ONLINE_PHONE`, `SMSTUNNEL_E2E_OFFLINE_PHONE`, `SMSTUNNEL_E2E_NUMBER`, `SMSTUNNEL_E2E_EXPECT_RECEIVED` and `SMSTUNNEL_E2E_IDEMPOTENCY_KEY`. It sends 4 texts. The tests never touch your real keychain: they use `SMSTUNNEL_KEY_STORE=file` and a temporary `SMSTUNNEL_CONFIG_DIR`. `SMSTUNNEL_KEYCHAIN_SERVICE` changes the keychain item name, for a manual check of the keychain code with a dummy key; `SMSTUNNEL_POLL_INTERVAL_MS` makes `--wait` and `--watch` poll faster in tests.
+
+The exact behaviour, for ports to other languages, is in [CLI-SPEC.md](CLI-SPEC.md). Releases: [PUBLISHING.md](PUBLISHING.md).
 
 ## License
 
-MIT
+MIT, © NARBOWEB SRL. See [LICENSE](LICENSE).

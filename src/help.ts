@@ -3,11 +3,11 @@ import { DASHBOARD_URL, DEFAULT_API_BASE, VERSION } from './constants';
 const EXIT_CODES = `Exit codes:
   0  done (a text not confirmed by the phone counts as sent: don't send it again)
   1  something unexpected
-  2  invalid arguments, or SMSTunnel refused the input (400)
+  2  invalid arguments, or SMSTunnel refused the input (400; 422: --idempotency-key used for another text)
   3  no API key, or SMSTunnel refused it (401)
   4  the key or your plan doesn't allow it (403)
   5  not found (404)
-  6  too many requests, or today's allowance is used up (429)
+  6  too many requests, or today's allowance is used up (429); 409: --idempotency-key still in progress
   7  SMSTunnel could not be reached or had a problem (5xx)
   8  the text failed (send --wait)
   9  still waiting for your phone when --wait gave up
@@ -70,11 +70,15 @@ Options:
   --country <code>      Country code for a number written without + or 00, like +40
   --wait                Wait until your phone sent it (or it failed)
   --timeout <seconds>   How long --wait waits (default 120)
+  --idempotency-key <key>
+                        Run the same command again with the same key (within 24 hours) and
+                        SMSTunnel gives back the first answer instead of sending a second text
 
 Examples:
   smstunnel send +40712345678 "Your order is ready for pickup"
   smstunnel send 0712345678 --country +40 --phone "Store phone" --wait "See you at 10"
   echo "Backup finished" | smstunnel send +40712345678
+  smstunnel send +40712345678 "Order 1042 is ready" --idempotency-key order-1042-ready
 
 Texts go out in the order you send them, up to 1600 characters each. If none of your phones is
 online, the text waits and goes out when one is back online (within 3 days).`,
@@ -85,7 +89,7 @@ Sends a sign-in code you generated, from your own phone. The text must contain t
 4 to 10 digits on their own (482913) or two groups of 3 joined by a dash (482-913), up to
 320 characters. Codes have their own daily allowance.
 
-Options: --phone, --country, --wait and --timeout, as for "smstunnel send".
+Options: --phone, --country, --wait, --timeout and --idempotency-key, as for "smstunnel send".
 
 Example:
   smstunnel code +40712345678 "Your sign-in code is 482913. It expires in 5 minutes."`,
@@ -97,7 +101,8 @@ Where a text is now: waiting for your phone, sent, or not sent (and why).`,
   received: `Usage: smstunnel received [options]
 
 Texts your phone received after you turned on "Sync received texts" in the SMSTunnel app.
-The key must be allowed to read received messages (dashboard → API keys).
+The key must be allowed to read them: in your dashboard, Apps → "Allow reading received texts"
+(or "Can also read received texts" when you add the app).
 
 Options:
   --since <when>        A date (2026-11-03, 2026-11-03T08:00:00Z) or a span back from now (30m, 2h, 1d)

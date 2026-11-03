@@ -23,6 +23,7 @@ const SEND_OPTIONS: OptionSpec[] = [
   { name: 'country', type: 'string' },
   { name: 'wait', type: 'boolean' },
   { name: 'timeout', type: 'string' },
+  { name: 'idempotency-key', type: 'string' },
 ];
 
 const COMMAND_OPTIONS: Record<string, OptionSpec[]> = {

@@ -130,12 +130,13 @@ export async function call<T>(
   operation: Operation,
   keySource: 'env' | 'stored' | 'typed',
   run: () => Promise<T>,
+  extra: { idempotencyKey?: boolean } = {},
 ): Promise<T> {
   try {
     return await run();
   } catch (error) {
     if (error instanceof ApiError) {
-      throw describeApiError(error, { operation, keySource, apiBase: ctx.apiBase });
+      throw describeApiError(error, { operation, keySource, apiBase: ctx.apiBase, ...extra });
     }
     throw error;
   }

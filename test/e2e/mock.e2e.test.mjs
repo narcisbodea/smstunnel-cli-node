@@ -3,7 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { startMockServer, KEYS, PHONES, SPECIAL } from './mock-server.mjs';
+import { startMockServer, KEYS, PHONES, SPECIAL, IDEMPOTENCY } from './mock-server.mjs';
 import { cleanEnv, runCli, tempConfig } from './run-cli.mjs';
 
 let mock;
@@ -313,7 +313,7 @@ test('received with a key that may not read them: exit 4 and how to allow it', a
   const result = await cli(['received'], { key: KEYS.sendOnly });
   assert.equal(result.code, 4);
   assert.match(result.stderr, /may not read received texts/);
-  assert.match(result.stderr, /allow reading received messages/);
+  assert.match(result.stderr, /choose "Allow reading received texts" for this key, or add an app with "Can also read received texts" ticked/);
 });
 
 test('received --watch prints new texts as they arrive', async () => {
@@ -365,6 +365,99 @@ test('API addresses that are not SMSTunnel, or not reachable: exit 2 or 7', asyn
   });
   assert.equal(down.code, 7);
   assert.match(down.stderr, /Could not reach SMSTunnel at 127\.0\.0\.1:9/);
+});
+
+test('send --idempotency-key: the same command again gets the first answer back, not a second text', async () => {
+  const key = 'order-1042-ready';
+  const first = await cli(['send', '+40712345678', 'Order 1042 is ready', '--idempotency-key', key]);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(lastRequest('/api/v1/sms/send').headers['idempotency-key'], key);
+  assert.doesNotMatch(first.stdout, /Already handed over/);
+  const id = /Message id: ([0-9a-f]{24})/.exec(first.stdout)[1];
+  const texts = mock.state.messages.size;
+
+  const again = await cli(['send', '+40712345678', 'Order 1042 is ready', '--idempotency-key', key]);
+  assert.equal(again.code, 0, again.stderr);
+  assert.equal(
+    again.stdout,
+    'Already handed over with this --idempotency-key: SMSTunnel gave back its answer to the first request and did not send the text again.\n' +
+      'Handed to your phone, which sends it from your number.\n' +
+      `Message id: ${id}. Check it with: smstunnel status ${id}\n`,
+  );
+  const json = await cli(['send', '+40712345678', 'Order 1042 is ready', '--idempotency-key', key, '--json']);
+  const data = JSON.parse(json.stdout);
+  assert.equal(data.replayed, true);
+  assert.equal(data.messageId, id);
+  assert.equal(data.result, 'handed-over');
+  const waited = await cli(['send', '+40712345678', 'Order 1042 is ready', '--idempotency-key', key, '--wait']);
+  assert.equal(waited.code, 0, waited.stderr);
+  assert.match(waited.stderr, /^Already handed over with this --idempotency-key/);
+  assert.match(waited.stdout, new RegExp(`^Sent by your phone at .*\. Message id: ${id}$`, 'm'));
+  assert.equal(mock.state.messages.size, texts, 'no second text');
+
+  const plain = await cli(['send', '+40712345678', 'Without a key', '--json']);
+  assert.equal(JSON.parse(plain.stdout).replayed, false);
+  assert.equal(lastRequest('/api/v1/sms/send').headers['idempotency-key'], undefined);
+});
+
+test('--idempotency-key used for another text: exit 2, nothing sent', async () => {
+  const texts = mock.state.messages.size;
+  const result = await cli(['send', '+40712345678', 'A different text', '--idempotency-key', 'order-1042-ready']);
+  assert.equal(result.code, 2);
+  assert.equal(
+    result.stderr.trim(),
+    'This --idempotency-key was already used in the last 24 hours for a different text (another number, message, phone or country code, or "code" instead of "send"). Nothing was sent. Use a new key for a new text.',
+  );
+  const json = await cli(['code', '+40712345678', 'Order 1042 is ready 482913', '--idempotency-key', 'order-1042-ready', '--json']);
+  assert.equal(json.code, 2);
+  assert.equal(JSON.parse(json.stderr).error.code, 'IDEMPOTENCY_KEY_REUSED');
+  assert.equal(mock.state.messages.size, texts);
+});
+
+test('--idempotency-key still in progress: exit 6, run it again in a second', async () => {
+  const result = await cli(['send', '+40712345678', 'Hi', '--idempotency-key', IDEMPOTENCY.inProgress]);
+  assert.equal(result.code, 6);
+  assert.equal(
+    result.stderr.trim(),
+    'SMSTunnel is still handling an earlier request with this --idempotency-key. Run the same command again in 1 second to get its answer; it will not send a second text.',
+  );
+});
+
+test('--idempotency-key is checked before any call, and only send and code take it', async () => {
+  const before = sendsSoFar();
+  for (const value of ['x'.repeat(256), 'commande-é', '   ']) {
+    const result = await cli(['send', '+40712345678', 'Hi', '--idempotency-key', value]);
+    assert.equal(result.code, 2, value);
+    assert.match(result.stderr, /^--idempotency-key takes 1 to 255 printable ASCII characters/, value);
+  }
+  assert.equal(sendsSoFar(), before);
+  const phones = await cli(['phones', '--idempotency-key', 'k']);
+  assert.equal(phones.code, 2);
+  assert.match(phones.stderr, /--idempotency-key is not an option of "smstunnel phones"/);
+});
+
+test('code --idempotency-key: the header goes to send-2fa', async () => {
+  const result = await cli(['code', '+40712345678', 'Your sign-in code is 552211', '--idempotency-key', 'login-552211']);
+  assert.equal(result.code, 0, result.stderr);
+  const request = lastRequest('/api/v1/sms/send-2fa');
+  assert.equal(request.headers['idempotency-key'], 'login-552211');
+  assert.deepEqual(request.body, { to: '+40712345678', message: 'Your sign-in code is 552211' });
+});
+
+test('with --idempotency-key, a 500 or a broken connection is kept for the key and said so', async () => {
+  const first = await cli(['send', SPECIAL.serverProblem, 'Hi', '--idempotency-key', 'server-problem-1']);
+  assert.equal(first.code, 7);
+  assert.match(first.stderr, /^SMSTunnel had a problem \(HTTP 500\)\. The text may or may not have been taken: .*Running the command again with the same key gets this answer again; use a new key only once you know the text did not go out\.$/m);
+  const again = await cli(['send', SPECIAL.serverProblem, 'Hi', '--idempotency-key', 'server-problem-1']);
+  assert.equal(again.code, 7);
+  assert.match(again.stderr, /^SMSTunnel had a problem \(HTTP 500\) with the first request that used this --idempotency-key, and gives that same answer for 24 hours\./);
+
+  const dropped = await cli(['send', SPECIAL.connectionDrops, 'Hi', '--idempotency-key', 'dropped-1']);
+  assert.equal(dropped.code, 7);
+  assert.equal(
+    dropped.stderr.trim(),
+    'The connection to SMSTunnel broke after the text was handed over, so it may have gone out. Run the same command again with the same --idempotency-key: SMSTunnel will not send the text twice.',
+  );
 });
 
 test('every call: the key only in X-API-Key, never in a URL; never send-bulk; a User-Agent', () => {

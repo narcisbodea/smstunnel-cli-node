@@ -14,9 +14,20 @@
     "2fa",
     "terminal"
   ],
-  "author": "NARBOWEB SRL",
+  "author": {
+    "name": "Narcis Bodea",
+    "email": "contact@narboweb.ro",
+    "url": "https://smstunnel.io"
+  },
   "license": "MIT",
-  "homepage": "https://smstunnel.io",
+  "homepage": "https://github.com/narcisbodea/smstunnel-cli#readme",
+  "bugs": {
+    "url": "https://github.com/narcisbodea/smstunnel-cli/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/narcisbodea/smstunnel-cli.git"
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -29,12 +40,13 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "npm run build && node --test test/unit/args.test.mjs test/unit/numbers.test.mjs test/unit/sign-in-code.test.mjs test/unit/sms-parts.test.mjs test/unit/errors.test.mjs test/unit/store.test.mjs test/unit/time.test.mjs test/unit/format.test.mjs",
+    "test": "npm run build && node --test test/unit/args.test.mjs test/unit/numbers.test.mjs test/unit/sign-in-code.test.mjs test/unit/sms-parts.test.mjs test/unit/errors.test.mjs test/unit/store.test.mjs test/unit/time.test.mjs test/unit/format.test.mjs test/unit/idempotency-key.test.mjs",
     "test:e2e": "npm run build && node --test test/e2e/mock.e2e.test.mjs",
     "test:dev-api": "npm run build && node --test test/e2e/dev-api.e2e.test.mjs",
     "prepack": "npm run build",

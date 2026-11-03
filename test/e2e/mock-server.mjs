@@ -26,6 +26,11 @@ export const SPECIAL = {
   connectionDrops: '+15550000999', // the connection closes after the request was read
 };
 
+/** Idempotency-Key values that make the mock answer the way SMSTunnel does. */
+export const IDEMPOTENCY = {
+  inProgress: 'still-in-progress', // 409 IDEMPOTENCY_KEY_IN_PROGRESS with Retry-After: 1
+};
+
 const SEND_FIELDS = new Set(['to', 'message', 'deviceId', 'defaultCountryCode']);
 const SIGN_IN_CODE = [/(?<![\w+]|\d[.,:/])\d{4,10}(?!\w|[.,:/]\d)/, /(?<![\w+-]|\d[.,:/])\d{3}-\d{3}(?!\w|-\d|[.,:/]\d)/];
 
@@ -54,6 +59,8 @@ export async function startMockServer() {
       },
     ],
     counter: 0,
+    idempotency: new Map(),
+    replays: 0,
   };
 
   const json = (res, status, body, headers = {}) => {
@@ -61,6 +68,52 @@ export async function startMockServer() {
     res.end(JSON.stringify(body));
   };
   const nextId = () => (state.counter += 1).toString(16).padStart(24, '0');
+
+  /** What SMSTunnel answers to a send: { status, body, headers }, or { drop: true } to break the connection. */
+  const sendAnswer = (path, body) => {
+    const answer = (status, b, headers = {}) => ({ status, body: b, headers });
+    const extra = Object.keys(body ?? {}).filter((name) => !SEND_FIELDS.has(name));
+    if (extra.length > 0) {
+      return answer(400, { statusCode: 400, message: extra.map((name) => `property ${name} should not exist`), error: 'Bad Request' });
+    }
+    const { to, message, deviceId } = body ?? {};
+    if (typeof to !== 'string' || typeof message !== 'string') {
+      return answer(400, { statusCode: 400, message: ['to must be a string', 'message must be a string'], error: 'Bad Request' });
+    }
+    switch (to) {
+      case SPECIAL.rateLimited:
+        return answer(429, { statusCode: 429, message: 'ThrottlerException: Too Many Requests' }, { 'Retry-After': '7' });
+      case SPECIAL.allowanceUsed:
+        return answer(429, { statusCode: 429, message: "You've sent today's 25 texts on the Free plan. More go out tomorrow." });
+      case SPECIAL.planRefused:
+        return answer(403, { statusCode: 403, message: 'Maximum privacy needs the Professional or Enterprise plan', error: 'Forbidden' });
+      case SPECIAL.serverProblem:
+        return answer(500, { statusCode: 500, message: 'Internal server error' });
+      case SPECIAL.validation:
+        return answer(400, { statusCode: 400, message: ['Phone number must contain 7-25 characters', 'second problem'], error: 'Bad Request' });
+      case SPECIAL.connectionDrops:
+        return { drop: true };
+      default:
+        break;
+    }
+    if (path === '/sms/send-2fa' && !SIGN_IN_CODE.some((pattern) => pattern.test(message))) {
+      return answer(400, { statusCode: 400, message: 'Invalid 2FA message: No valid verification code found', error: 'Bad Request' });
+    }
+    let phone = PHONES[0];
+    if (deviceId !== undefined) {
+      phone = PHONES.find((candidate) => candidate.id === deviceId);
+      if (!phone) return answer(404, { statusCode: 404, message: 'Device not found', error: 'Not Found' });
+    }
+    const queued = !phone.isOnline;
+    const messageId = nextId();
+    state.messages.set(messageId, { to, message, deviceId: phone.id, queued, polls: 0, kind: path === '/sms/send-2fa' ? 'code' : 'text' });
+    return answer(200, {
+      success: true,
+      messageId,
+      ...(queued ? { queued: true } : {}),
+      data: { messageId, branded: message.includes('BRANDED'), ...(queued ? { queued: true } : {}), remaining: { clean: 9, total: 'unlimited' } },
+    });
+  };
 
   const server = http.createServer(async (req, res) => {
     const chunks = [];
@@ -102,48 +155,43 @@ export async function startMockServer() {
     }
 
     if (req.method === 'POST' && (path === '/sms/send' || path === '/sms/send-2fa')) {
-      const extra = Object.keys(body ?? {}).filter((name) => !SEND_FIELDS.has(name));
-      if (extra.length > 0) {
-        return json(res, 400, { statusCode: 400, message: extra.map((name) => `property ${name} should not exist`), error: 'Bad Request' });
-      }
-      const { to, message, deviceId } = body ?? {};
-      if (typeof to !== 'string' || typeof message !== 'string') {
-        return json(res, 400, { statusCode: 400, message: ['to must be a string', 'message must be a string'], error: 'Bad Request' });
-      }
-      switch (to) {
-        case SPECIAL.rateLimited:
-          return json(res, 429, { statusCode: 429, message: 'ThrottlerException: Too Many Requests' }, { 'Retry-After': '7' });
-        case SPECIAL.allowanceUsed:
-          return json(res, 429, { statusCode: 429, message: "You've sent today's 25 texts on the Free plan. More go out tomorrow." });
-        case SPECIAL.planRefused:
-          return json(res, 403, { statusCode: 403, message: 'Maximum privacy needs the Professional or Enterprise plan', error: 'Forbidden' });
-        case SPECIAL.serverProblem:
-          return json(res, 500, { statusCode: 500, message: 'Internal server error' });
-        case SPECIAL.validation:
-          return json(res, 400, { statusCode: 400, message: ['Phone number must contain 7-25 characters', 'second problem'], error: 'Bad Request' });
-        case SPECIAL.connectionDrops:
+      // Idempotency-Key, as public-api/idempotency does it: the same key and request within 24 h get
+      // the first answer back (Idempotent-Replayed: true); a different request with the key gets 422;
+      // 2xx and 5xx answers are kept, a 4xx frees the key.
+      const rawKey = req.headers['idempotency-key'];
+      const idemKey = typeof rawKey === 'string' ? rawKey.trim() : '';
+      if (idemKey !== '') {
+        if (idemKey.length > 255 || !/^[\x20-\x7E]+$/.test(idemKey)) {
+          return json(res, 400, { statusCode: 400, error: 'Bad Request', code: 'IDEMPOTENCY_KEY_INVALID', message: 'Idempotency-Key must be 1 to 255 printable ASCII characters (a UUID is a good choice).' });
+        }
+        if (idemKey === IDEMPOTENCY.inProgress) {
+          return json(res, 409, { statusCode: 409, error: 'Conflict', code: 'IDEMPOTENCY_KEY_IN_PROGRESS', message: 'A request with this Idempotency-Key is still being processed. Retry in a moment to get its result.' }, { 'Retry-After': '1' });
+        }
+        const scope = key + '\n' + idemKey;
+        const fingerprint = path + '\n' + JSON.stringify(body ?? {});
+        const stored = state.idempotency.get(scope);
+        if (stored && stored.fingerprint !== fingerprint) {
+          return json(res, 422, { statusCode: 422, error: 'Unprocessable Entity', code: 'IDEMPOTENCY_KEY_REUSED', message: 'This Idempotency-Key was already used in the last 24 hours for a different request (another endpoint, recipient, text, phone or country code). Use a new key for a new text.' });
+        }
+        if (stored) {
+          state.replays += 1;
+          return json(res, stored.status, stored.body, { 'Idempotent-Replayed': 'true' });
+        }
+        const answer = sendAnswer(path, body);
+        if (answer.drop) {
+          state.idempotency.set(scope, { fingerprint, status: 500, body: { statusCode: 500, message: 'Internal server error' } });
           req.socket.destroy();
           return undefined;
-        default:
-          break;
+        }
+        if (answer.status < 300 || answer.status >= 500) state.idempotency.set(scope, { fingerprint, status: answer.status, body: answer.body });
+        return json(res, answer.status, answer.body, answer.headers);
       }
-      if (path === '/sms/send-2fa' && !SIGN_IN_CODE.some((pattern) => pattern.test(message))) {
-        return json(res, 400, { statusCode: 400, message: 'Invalid 2FA message: No valid verification code found', error: 'Bad Request' });
+      const answer = sendAnswer(path, body);
+      if (answer.drop) {
+        req.socket.destroy();
+        return undefined;
       }
-      let phone = PHONES[0];
-      if (deviceId !== undefined) {
-        phone = PHONES.find((candidate) => candidate.id === deviceId);
-        if (!phone) return json(res, 404, { statusCode: 404, message: 'Device not found', error: 'Not Found' });
-      }
-      const queued = !phone.isOnline;
-      const messageId = nextId();
-      state.messages.set(messageId, { to, message, deviceId: phone.id, queued, polls: 0, kind: path === '/sms/send-2fa' ? 'code' : 'text' });
-      return json(res, 200, {
-        success: true,
-        messageId,
-        ...(queued ? { queued: true } : {}),
-        data: { messageId, branded: message.includes('BRANDED'), ...(queued ? { queued: true } : {}), remaining: { clean: 9, total: 'unlimited' } },
-      });
+      return json(res, answer.status, answer.body, answer.headers);
     }
 
     const status = /^\/sms\/status\/([^/]+)$/.exec(path);

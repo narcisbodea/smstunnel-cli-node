@@ -7,7 +7,8 @@
 //   SMSTUNNEL_E2E_OFFLINE_PHONE   id or name of a phone that stays offline
 //   SMSTUNNEL_E2E_NUMBER          the test recipient (default +14155550123)
 //   SMSTUNNEL_E2E_EXPECT_RECEIVED a received text the fake phone delivered before the run (optional)
-// It sends exactly 3 texts: one sent, one queued, one sign-in code.
+//   SMSTUNNEL_E2E_IDEMPOTENCY_KEY an Idempotency-Key to use (optional; default: a new one per run)
+// It sends exactly 4 texts: one sent, one queued, one sign-in code, one sent twice with one Idempotency-Key.
 //   npm run test:dev-api
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -56,7 +57,7 @@ test('phones, with the saved key', { skip }, async () => {
   assert.ok(Array.isArray(data.devices) && data.devices.length >= 1);
 });
 
-test('send --wait: sent by the fake phone (text 1 of 3)', { skip }, async () => {
+test('send --wait: sent by the fake phone (text 1 of 4)', { skip }, async () => {
   const args = ['send', number, 'smstunnel CLI e2e: hello from the command line', '--wait', '--timeout', '30', '--json'];
   if (E.SMSTUNNEL_E2E_ONLINE_PHONE) args.push('--phone', E.SMSTUNNEL_E2E_ONLINE_PHONE);
   const result = await run(args);
@@ -77,19 +78,37 @@ test('status of that text', { skip }, async () => {
   assert.equal(unknown.code, 5);
 });
 
-test('send to the offline phone: queued, --wait gives up with exit 9 (text 2 of 3)', { skip: skip || (!E.SMSTUNNEL_E2E_OFFLINE_PHONE && 'no offline phone given') }, async () => {
+test('send to the offline phone: queued, --wait gives up with exit 9 (text 2 of 4)', { skip: skip || (!E.SMSTUNNEL_E2E_OFFLINE_PHONE && 'no offline phone given') }, async () => {
   const result = await run(['send', number, 'smstunnel CLI e2e: queued text', '--phone', E.SMSTUNNEL_E2E_OFFLINE_PHONE, '--wait', '--timeout', '3']);
   assert.equal(result.code, 9, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stderr, /^Queued \(message id [0-9a-f]{24}\): none of your phones is online right now/m);
   assert.match(result.stderr, /Still waiting for your phone after 3 s \(it is offline\)/);
 });
 
-test('code --wait: a sign-in code, sent (text 3 of 3)', { skip }, async () => {
+test('code --wait: a sign-in code, sent (text 3 of 4)', { skip }, async () => {
   const args = ['code', number, 'Your smstunnel CLI e2e sign-in code is 482913', '--wait', '--timeout', '30'];
   if (E.SMSTUNNEL_E2E_ONLINE_PHONE) args.push('--phone', E.SMSTUNNEL_E2E_ONLINE_PHONE);
   const result = await run(args);
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /^Sent by your phone at /);
+});
+
+test('send twice with one --idempotency-key: one text, the same message id (text 4 of 4)', { skip }, async () => {
+  const idempotencyKey = E.SMSTUNNEL_E2E_IDEMPOTENCY_KEY || `smstunnel-cli-e2e-${Date.now()}`;
+  const args = ['send', number, `smstunnel CLI e2e: idempotency ${idempotencyKey}`, '--idempotency-key', idempotencyKey, '--json'];
+  if (E.SMSTUNNEL_E2E_ONLINE_PHONE) args.push('--phone', E.SMSTUNNEL_E2E_ONLINE_PHONE);
+  const first = await run(args);
+  assert.equal(first.code, 0, `${first.stdout}\n${first.stderr}`);
+  const again = await run(args);
+  assert.equal(again.code, 0, `${again.stdout}\n${again.stderr}`);
+  const a = JSON.parse(first.stdout);
+  const b = JSON.parse(again.stdout);
+  assert.equal(a.replayed, false);
+  assert.equal(b.replayed, true);
+  assert.equal(b.messageId, a.messageId);
+  const other = await run(['send', number, 'smstunnel CLI e2e: another text, same key', '--idempotency-key', idempotencyKey]);
+  assert.equal(other.code, 2, other.stderr);
+  assert.match(other.stderr, /already used in the last 24 hours for a different text/);
 });
 
 test('received', { skip }, async () => {
