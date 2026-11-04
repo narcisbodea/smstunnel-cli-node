@@ -22,13 +22,9 @@ npm install -g smstunnel
 
 Or run it once without installing: `npx smstunnel phones`.
 
-With Homebrew (macOS and Linux), once the tap is published:
-
-```bash
-brew install narcisbodea/tap/smstunnel
-```
-
 On Windows, install Node.js first if you don't have it (`winget install OpenJS.NodeJS.LTS`), then `npm install -g smstunnel`.
+
+Without Node.js: the same `smstunnel` command is also a single native program for Windows, Linux and macOS (winget, Scoop, apt, dnf, AUR, Homebrew): see [narcisbodea/smstunnel-cli](https://github.com/narcisbodea/smstunnel-cli). Both share the same saved key.
 
 ## Get your key
 
